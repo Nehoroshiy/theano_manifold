@@ -69,7 +69,7 @@ class ManifoldElement(Variable):
         if isinstance(other, ManifoldElement):
             mid = self.S.dot(self.V.dot(other.U)).dot(other.S)
             U, S, V = tensor.nlinalg.svd(mid, full_matrices=False)
-            return OldManifoldElement(self.U.dot(U), tensor.diag(self.S), V.dot(self.V))
+            return ManifoldElement(self.U.dot(U), tensor.diag(self.S), V.dot(self.V))
         else:
             raise ValueError('dot must be performed on ManifoldElements.')
 
