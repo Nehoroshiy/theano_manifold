@@ -8,10 +8,175 @@ from scipy.linalg import solve_lyapunov as lyap, rq
 
 from manifolds.manifold import Manifold
 
+import copy
 
 import theano
 from theano import tensor
-from theano.gof.graph import Variable
+from theano.gof import Container, Variable
+
+
+
+class SharedManifoldVariable(theano.compile.SharedVariable):
+    """
+    Variable that is (defaults to being) shared between functions that
+    it appears in.
+    Parameters
+    ----------
+    name : str
+        The name for this variable (see `Variable`).
+    type : str
+        The type for this variable (see `Variable`).
+    value
+        A value to associate with this variable (a new container will be
+        created).
+    strict
+        True : assignments to .value will not be cast or copied, so they must
+        have the correct type.
+    allow_downcast
+        Only applies if `strict` is False.
+        True : allow assigned value to lose precision when cast during
+        assignment.
+        False : never allow precision loss.
+        None : only allow downcasting of a Python float to a scalar floatX.
+    container
+        The container to use for this variable. Illegal to pass this as well as
+        a value.
+    Notes
+    -----
+    For more user-friendly constructor, see `shared`.
+    """
+
+    # Container object
+    container = None
+    """
+    A container to use for this SharedVariable when it is an implicit
+    function parameter.
+    :type: `Container`
+    """
+
+    # default_update
+    # If this member is present, its value will be used as the "update" for
+    # this Variable, unless another update value has been passed to "function",
+    # or the "no_default_updates" list passed to "function" contains it.
+
+    def __init__(self, name, type, value, strict,
+                 allow_downcast=None, container=None):
+        super(SharedManifoldVariable, self).__init__(type=type, name=name)
+
+        if container is not None:
+            self.container = container
+            if (value is not None) or (strict is not None):
+                raise TypeError('value and strict are ignored if you pass '
+                                'a container here')
+        else:
+            if container is not None:
+                raise TypeError('Error to specify both value and container')
+            self.container = Container(
+                self,
+                storage=[type.filter(value, strict=strict,
+                                     allow_downcast=allow_downcast)],
+                readonly=False,
+                strict=strict,
+                allow_downcast=allow_downcast)
+
+    def get_value(self, borrow=False, return_internal_type=False):
+        """
+        Get the non-symbolic value associated with this SharedVariable.
+        Parameters
+        ----------
+        borrow : bool
+            True to permit returning of an object aliased to internal memory.
+        return_internal_type : bool
+            True to permit the returning of an arbitrary type object used
+            internally to store the shared variable.
+        Only with borrow=False and return_internal_type=True does this function
+        guarantee that you actually get the internal object.
+        But in that case, you may get different return types when using
+        different compute devices.
+        """
+        if borrow:
+            return self.container.value
+        else:
+            return copy.deepcopy(self.container.value)
+
+    def set_value(self, new_value, borrow=False):
+        """
+        Set the non-symbolic value associated with this SharedVariable.
+        Parameters
+        ----------
+        borrow : bool
+            True to use the new_value directly, potentially creating problems
+            related to aliased memory.
+        Changes to this value will be visible to all functions using
+        this SharedVariable.
+        """
+        if borrow:
+            self.container.value = new_value
+        else:
+            self.container.value = copy.deepcopy(new_value)
+
+    def zero(self, borrow=False):
+        """
+        Set the values of a shared variable to 0.
+        Parameters
+        ----------
+        borrow : bbol
+            True to modify the value of a shared variable directly by using
+            its previous value. Potentially this can cause problems
+            regarding to the aliased memory.
+        Changes done with this function will be visible to all functions using
+        this SharedVariable.
+        """
+        if not isinstance(self.container.value, ManifoldElement):
+            raise TypeError("underlying value must be ManifoldElement!")
+        if borrow:
+            self.container.value.make_zero()
+        else:
+            self.container.value = FixedRankEmbeeded(*self.container.value.shape, self.container.value.r).rand().make_zero()
+
+    def clone(self):
+        cp = self.__class__(
+            name=self.name,
+            type=self.type,
+            value=None,
+            strict=None,
+            container=self.container)
+        cp.tag = copy.copy(self.tag)
+        return cp
+
+    def __getitem__(self, *args):
+        # __getitem__ is not available for generic SharedVariable objects.
+        # We raise a TypeError like Python would do if __getitem__ was not
+        # implemented at all, but with a more explicit error message to help
+        # Theano users figure out the root of the problem more easily.
+        value = self.get_value(borrow=True)
+        if isinstance(value, ManifoldElement):
+            # Array probably had an unknown dtype.
+            msg = ("a ManifoldElement array with dtype: '%s'. This data type is not "
+                   "currently recognized by Theano tensors: please cast "
+                   "your data into a supported numeric type if you need "
+                   "Theano tensor functionalities." % value.dtype)
+        else:
+            msg = ('an object of type: %s. Did you forget to cast it into '
+                   'a Numpy array before calling theano.shared()?' %
+                   type(value))
+
+        raise TypeError(
+            "The generic 'SharedVariable' object is not subscriptable. "
+            "This shared variable contains %s" % msg)
+
+    def _value_get(self):
+        raise Exception("sharedvar.value does not exist anymore. Use "
+                        "sharedvar.get_value() or sharedvar.set_value()"
+                        " instead.")
+
+    def _value_set(self, new_value):
+        raise Exception("sharedvar.value does not exist anymore. Use "
+                        "sharedvar.get_value() or sharedvar.set_value()"
+                        " instead.")
+
+    # We keep this just to raise an error
+    value = property(_value_get, _value_set)
 
 
 class FixedRankManifoldType(theano.tensor.type.TensorType):#theano.gof.Type):
@@ -54,6 +219,7 @@ class ManifoldElement(Variable):
         self.U = U.copy()
         self.S = S.copy()
         self.V = V.copy()
+        self.r = S.shape[0]
         self.shape=(U.shape[0], V.shape[1])
         self.ndim = len(self.shape)
 
@@ -107,6 +273,11 @@ class ManifoldElement(Variable):
         #cp = self.__class__(self.type, None, None, self.name)
         #cp.tag = copy(self.tag)
         return cp
+
+    def make_zero(self):
+        self.U = tensor.zeros_like(self.U)
+        self.S = tensor.zeros_like(self.S)
+        self.V = tensor.zeros_like(self.V)
 
     @property
     def T(self):
@@ -166,6 +337,11 @@ class TangentVector(Variable):
 
     def __rmul__(self, other):
         return self.__mul__(other)
+
+    def make_zero(self):
+        self.Up = tensor.zeros_like(self.Up)
+        self.M = tensor.zeros_like(self.M)
+        self.Vp = tensor.zeros_like(self.Vp)
 
     def clone(self):
         """

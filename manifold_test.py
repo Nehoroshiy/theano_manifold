@@ -69,6 +69,25 @@ class DotLayer(lasagne.layers.Layer):
 
 
 
+
+def iterate_minibatches(X, y, batchsize):
+        n_samples = X.shape[0]
+
+        # Shuffle at the start of epoch
+        indices = np.arange(n_samples)
+        np.random.shuffle(indices)
+
+        for start in range(0, n_samples, batchsize):
+            end = min(start + batchsize, n_samples)
+
+            batch_idx = indices[start:end]
+
+            yield X[batch_idx], y[batch_idx]
+        if n_samples % batchsize != 0:
+            batch_idx = indices[n_samples - n_samples % batchsize :]
+            yield X[batch_idx], y[batch_idx]
+
+
 if __name__ == "__main__":
     from mnist import load_dataset
     X_train,y_train,X_val,y_val,X_test,y_test = load_dataset()
@@ -119,4 +138,41 @@ if __name__ == "__main__":
     #функция, которая обучает сеть на 1 шаг и возвращащет значение функции потерь и точности
     theano.config.exception_verbosity = 'high'
 
-    theano.function([input_X,target_y],[loss,accuracy],updates=updates_sgd)
+    train_fun = theano.function([input_X,target_y],[loss,accuracy],updates=updates_sgd)
+    accuracy_fun = theano.function([input_X,target_y],accuracy)
+
+    num_epochs = 5 #количество проходов по данным
+
+    batch_size = 50 #размер мини-батча
+
+    for epoch in range(num_epochs):
+        # In each epoch, we do a full pass over the training data:
+        train_err = 0
+        train_acc = 0
+        train_batches = 0
+        start_time = time.time()
+        for batch in iterate_minibatches(X_train, y_train,batch_size):
+            inputs, targets = batch
+            train_err_batch, train_acc_batch= train_fun(inputs, targets)
+            train_err += train_err_batch
+            train_acc += train_acc_batch
+            train_batches += 1
+
+        # And a full pass over the validation data:
+        val_acc = 0
+        val_batches = 0
+        for batch in iterate_minibatches(X_val, y_val, batch_size):
+            inputs, targets = batch
+            val_acc += accuracy_fun(inputs, targets)
+            val_batches += 1
+
+
+        # Then we print the results for this epoch:
+        print("Epoch {} of {} took {:.3f}s".format(
+            epoch + 1, num_epochs, time.time() - start_time))
+
+        print("  training loss (in-iteration):\t\t{:.6f}".format(train_err / train_batches))
+        print("  train accuracy:\t\t{:.2f} %".format(
+            train_acc / train_batches * 100))
+        print("  validation accuracy:\t\t{:.2f} %".format(
+            val_acc / val_batches * 100))
