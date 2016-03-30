@@ -90,9 +90,9 @@ if __name__ == "__main__":
     biased_1 = lasagne.layers.BiasLayer(dense_1)
     nonlin_1 = lasagne.layers.NonlinearityLayer(biased_1, lasagne.nonlinearities.softmax)
 
-    dense_1 = lasagne.layers.DenseLayer(input_layer,num_units=25,
-                                       nonlinearity = lasagne.nonlinearities.sigmoid,
-                                       name = "hidden_dense_layer")
+    #dense_1 = lasagne.layers.DenseLayer(input_layer,num_units=25,
+    #                                   nonlinearity = lasagne.nonlinearities.sigmoid,
+    #                                   name = "hidden_dense_layer")
 
     #ВЫХОДНОЙ полносвязный слой, который принимает на вход dense_1 и имеет 10 нейронов -по нейрону на цифру
     #нелинейность - softmax - чтобы вероятности всех цифр давали в сумме 1
