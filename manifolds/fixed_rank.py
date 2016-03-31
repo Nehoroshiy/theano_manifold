@@ -1,10 +1,17 @@
-import warnings
 import numpy as np
 import numpy.linalg as la
 import numpy.random as rnd
 
-from scipy.sparse import coo_matrix
-from scipy.linalg import solve_lyapunov as lyap, rq
+import theano
+from theano import tensor
+from theano.tensor.shared_randomstreams import RandomStreams
+
+srnd = RandomStreams(rnd.randint(0, 1000))
+
+import warnings
+import numpy as np
+import numpy.linalg as la
+import numpy.random as rnd
 
 from manifolds.manifold import Manifold
 
@@ -15,89 +22,42 @@ from theano import tensor
 from theano.gof import Container, Variable
 
 
+class ManifoldElementShared(theano.compile.SharedVariable):
+    def __init__(self, value, name=None, type=theano.tensor.dmatrix):
+        if isinstance(value, tuple):
+            if len(value) == 2:
+                if isinstance(value[0], theano.compile.SharedVariable) and isinstance(value[1], tuple):
+                    value, shape = value
+                    self._m, self._n = shape
+                    self._r = value.get_value(borrow=True).shape[1]
+                    super(ManifoldElementShared, self).__init__(name=name,
+                                                        type=type,
+                                                        value=value.get_value(), strict=True)
+            elif len(value) == 3 and all([isinstance(item, np.ndarray) for item in value]):
+                U, S, V = value
+                self._m = U.shape[0]
+                self._n = V.shape[1]
+                self._r = S.shape[0]
+                super(ManifoldElementShared, self).__init__(name=name,
+                                                        type=type,
+                                                        value=np.vstack([U, S, V.T]), strict=True)
+            else:
+                raise TypeError("value must be a tuple(SharedVariable, shape) or a tuple of 3 ndarrays Up, M, Vp")
 
-class SharedManifoldVariable(theano.compile.SharedVariable):
-    """
-    Variable that is (defaults to being) shared between functions that
-    it appears in.
-    Parameters
-    ----------
-    name : str
-        The name for this variable (see `Variable`).
-    type : str
-        The type for this variable (see `Variable`).
-    value
-        A value to associate with this variable (a new container will be
-        created).
-    strict
-        True : assignments to .value will not be cast or copied, so they must
-        have the correct type.
-    allow_downcast
-        Only applies if `strict` is False.
-        True : allow assigned value to lose precision when cast during
-        assignment.
-        False : never allow precision loss.
-        None : only allow downcasting of a Python float to a scalar floatX.
-    container
-        The container to use for this variable. Illegal to pass this as well as
-        a value.
-    Notes
-    -----
-    For more user-friendly constructor, see `shared`.
-    """
-
-    # Container object
-    container = None
-    """
-    A container to use for this SharedVariable when it is an implicit
-    function parameter.
-    :type: `Container`
-    """
-
-    # default_update
-    # If this member is present, its value will be used as the "update" for
-    # this Variable, unless another update value has been passed to "function",
-    # or the "no_default_updates" list passed to "function" contains it.
-
-    def __init__(self, name, type, value, strict,
-                 allow_downcast=None, container=None):
-        super(SharedManifoldVariable, self).__init__(type=type, name=name)
-
-        if container is not None:
-            self.container = container
-            if (value is not None) or (strict is not None):
-                raise TypeError('value and strict are ignored if you pass '
-                                'a container here')
         else:
-            if container is not None:
-                raise TypeError('Error to specify both value and container')
-            self.container = Container(
-                self,
-                storage=[type.filter(value, strict=strict,
-                                     allow_downcast=allow_downcast)],
-                readonly=False,
-                strict=strict,
-                allow_downcast=allow_downcast)
+            raise TypeError("value must be tuple(SharedVariable, shape) or tuple of 3 ndarrays")
+        self.update_factor_view()
 
-    def get_value(self, borrow=False, return_internal_type=False):
-        """
-        Get the non-symbolic value associated with this SharedVariable.
-        Parameters
-        ----------
-        borrow : bool
-            True to permit returning of an object aliased to internal memory.
-        return_internal_type : bool
-            True to permit the returning of an arbitrary type object used
-            internally to store the shared variable.
-        Only with borrow=False and return_internal_type=True does this function
-        guarantee that you actually get the internal object.
-        But in that case, you may get different return types when using
-        different compute devices.
-        """
-        if borrow:
-            return self.container.value
-        else:
-            return copy.deepcopy(self.container.value)
+    def update_factor_view(self):
+        self.U = theano.shared(self.get_value(borrow=True)[:self._m, :],
+                               borrow=True,
+                               name="U")
+        self.S = theano.shared(self.get_value(borrow=True)[self._m: self._m + self._r, :],
+                               borrow=True,
+                               name="S")
+        self.V = theano.shared(self.get_value(borrow=True)[self._m + self._r :, :].T,
+                               borrow=True,
+                               name="V")
 
     def set_value(self, new_value, borrow=False):
         """
@@ -114,255 +74,112 @@ class SharedManifoldVariable(theano.compile.SharedVariable):
             self.container.value = new_value
         else:
             self.container.value = copy.deepcopy(new_value)
-
-    def zero(self, borrow=False):
-        """
-        Set the values of a shared variable to 0.
-        Parameters
-        ----------
-        borrow : bbol
-            True to modify the value of a shared variable directly by using
-            its previous value. Potentially this can cause problems
-            regarding to the aliased memory.
-        Changes done with this function will be visible to all functions using
-        this SharedVariable.
-        """
-        if not isinstance(self.container.value, ManifoldElement):
-            raise TypeError("underlying value must be ManifoldElement!")
-        if borrow:
-            self.container.value.make_zero()
-        else:
-            self.container.value = FixedRankEmbeeded(*self.container.value.shape, self.container.value.r).rand().make_zero()
-
-    def clone(self):
-        cp = self.__class__(
-            name=self.name,
-            type=self.type,
-            value=None,
-            strict=None,
-            container=self.container)
-        cp.tag = copy.copy(self.tag)
-        return cp
-
-    def __getitem__(self, *args):
-        # __getitem__ is not available for generic SharedVariable objects.
-        # We raise a TypeError like Python would do if __getitem__ was not
-        # implemented at all, but with a more explicit error message to help
-        # Theano users figure out the root of the problem more easily.
-        value = self.get_value(borrow=True)
-        if isinstance(value, ManifoldElement):
-            # Array probably had an unknown dtype.
-            msg = ("a ManifoldElement array with dtype: '%s'. This data type is not "
-                   "currently recognized by Theano tensors: please cast "
-                   "your data into a supported numeric type if you need "
-                   "Theano tensor functionalities." % value.dtype)
-        else:
-            msg = ('an object of type: %s. Did you forget to cast it into '
-                   'a Numpy array before calling theano.shared()?' %
-                   type(value))
-
-        raise TypeError(
-            "The generic 'SharedVariable' object is not subscriptable. "
-            "This shared variable contains %s" % msg)
-
-    def _value_get(self):
-        raise Exception("sharedvar.value does not exist anymore. Use "
-                        "sharedvar.get_value() or sharedvar.set_value()"
-                        " instead.")
-
-    def _value_set(self, new_value):
-        raise Exception("sharedvar.value does not exist anymore. Use "
-                        "sharedvar.get_value() or sharedvar.set_value()"
-                        " instead.")
-
-    # We keep this just to raise an error
-    value = property(_value_get, _value_set)
-
-
-class FixedRankManifoldType(theano.tensor.type.TensorType):#theano.gof.Type):
-    def __init__(self):
-        #super(FixedRankManifoldType, self).__init__(dtype=np.float, broadcastable=(False, False))
-        self.dtype='floatX'#np.array([1.0]).dtype
-        self.broadcastable=(False, False)
-
-    def filter(self, x, strict=True, allow_downcast=None):
-        if strict:
-            if isinstance(x, tensor.Variable):
-                u, s, v = tensor.nlinalg.svd(x, full_matrices=False)
-                return ManifoldElement(u, tensor.diag(s), v)
-            if isinstance(x, np.ndarray):
-                u, s, v = np.linalg.svd(x, full_matrices=False)
-                return ManifoldElement(theano.shared(u), theano.shared(np.diag(s)), theano.shared(v))
-            if isinstance(x, ManifoldElement):
-                return ManifoldElement(x.U, x.S, x.V)
-            else:
-                raise TypeError('Expected an symbolc tensor variable, ndarray or ManifoldElement!')
-        elif allow_downcast:
-            raise TypeError('downcast is not allowed!')
-            u, s, v = np.linalg.svd(np.array(x, dtype=float), full_matrices=False)
-            return ManifoldElement(u, np.diag(s), v)
-        else:   # Covers both the False and None cases.
-             raise TypeError('The double type cannot accurately represent '
-                             'value %s (of type %s): you must explicitly '
-                             'allow downcasting if you want to do this.'
-                             % (x, type(x)))
-
-    def __str__(self):
-        return "FixedRankManifoldType"
-
-fman = FixedRankManifoldType()
-
-
-class ManifoldElement(Variable):
-    def __init__(self, U, S, V):
-        super(ManifoldElement, self).__init__(fman)
-        self.U = U.copy()
-        self.S = S.copy()
-        self.V = V.copy()
-        self.r = S.shape[0]
-        self.shape=(U.shape[0], V.shape[1])
-        self.ndim = len(self.shape)
-
-    def __add__(self, other):
-        if isinstance(other, TangentVector):
-            return FixedRankEmbeeded(self.U.shape[0], self.V.shape[1], self.S.shape[0]).retr(self, other)
-
-    def __sub__(self, other):
-        if isinstance(other, TangentVector):
-            return FixedRankEmbeeded(self.U.shape[0], self.V.shape[1], self.S.shape[0]).retr(self, other, -1.0)
-
-    def dot(self, other):
-        if isinstance(other, ManifoldElement):
-            mid = self.S.dot(self.V.dot(other.U)).dot(other.S)
-            U, S, V = tensor.nlinalg.svd(mid, full_matrices=False)
-            return ManifoldElement(self.U.dot(U), tensor.diag(self.S), V.dot(self.V))
-        else:
-            raise ValueError('dot must be performed on ManifoldElements.')
-
-    """
-    def __getitem__(self, item):
-        if hasattr(item, '__len__') and len(item) == 2 and len(item[0]) == len(item[1]):
-            rows = self.U[item[0], :].dot(self.S)
-            cols = self.V[:, item[1]]
-            data = (rows * cols.T).sum(1)
-            #assert(data.size == len(item[0]))
-            shape = (self.U.shape[0], self.V.shape[1])
-            return coo_matrix((data, tuple(item)), shape=shape).tocsr()
-        else:
-            raise ValueError('__getitem__ now supports only indices set')
-    """
-
-    def full(self):
-        return self.U.dot(self.S).dot(self.V)
-
-    def clone(self):
-        """
-        Return a new Variable like self.
-        Returns
-        -------
-        Variable instance
-            A new Variable instance (or subclass instance) with no owner or
-            index.
-        Notes
-        -----
-        Tags are copied to the returned instance.
-        Name is copied to the returned instance.
-        """
-        # return copy(self)
-        cp = self.__class__(self.U, self.S, self.V)
-        #cp = self.__class__(self.type, None, None, self.name)
-        #cp.tag = copy(self.tag)
-        return cp
-
-    def make_zero(self):
-        self.U = tensor.zeros_like(self.U)
-        self.S = tensor.zeros_like(self.S)
-        self.V = tensor.zeros_like(self.V)
+        self.update_factor_view()
 
     @property
-    def T(self):
-        return ManifoldElement(self.V.T, self.S.T, self.U.T)
+    def r(self):
+        return self._r
+
+    @property
+    def shape(self):
+        return (self._m, self._n)
+
+    @property
+    def ndim(self):
+        return len(self.shape)
+
+    @classmethod
+    def from_vars(cls, values, shape, r, name=None, type=theano.tensor.dmatrix):
+        u, s, v = values
+        value = theano.shared(np.zeros((shape[0] + shape[1] + r, r)))
+        new_value = value
+        new_value = theano.tensor.set_subtensor(new_value[:shape[0]], u)
+        new_value = theano.tensor.set_subtensor(new_value[shape[0]: shape[0] + r], s)
+        new_value = theano.tensor.set_subtensor(new_value[shape[0] + r :], v)
+        updates = [(value, new_value)]
+        func = theano.function(inputs=[], outputs=[], updates=updates)
+        func()
+        return cls((value, shape), name=name, type=type)
 
 
-class FixedRankTangentType(theano.tensor.type.TensorType):#theano.gof.Type):
-    def __init__(self):
-        #super(FixedRankManifoldType, self).__init__(dtype=np.float, broadcastable=(False, False))
-        self.dtype='floatX'#np.array([1.0]).dtype
-        self.broadcastable=(False, False)
-
-    def filter(self, x, strict=True, allow_downcast=None):
-        if strict:
-            if isinstance(x, TangentVector):
-                return TangentVector(x.Up, x.M, x.Vp)
+class TangentVectorShared(theano.compile.SharedVariable):
+    def __init__(self, value, name=None, type=theano.tensor.dmatrix):
+        if isinstance(value, tuple):
+            if len(value) == 2:
+                if isinstance(value[0], theano.compile.SharedVariable) and isinstance(value[1], tuple):
+                    value, shape = value
+                    self._m, self._n = shape
+                    self._r = value.get_value(borrow=True).shape[1]
+                    super(TangentVectorShared, self).__init__(name=name,
+                                                        type=type,
+                                                        value=value.get_value(), strict=True)
+            elif len(value) == 3 and all([isinstance(item, np.ndarray) for item in value]):
+                Up, M, Vp = value
+                self._m = Up.shape[0]
+                self._n = Vp.shape[1]
+                self._r = M.shape[0]
+                super(TangentVectorShared, self).__init__(name=name,
+                                                        type=type,
+                                                        value=np.vstack([Up, M, Vp.T]), strict=True)
             else:
-                raise TypeError('Expected a TangentVector!')
-        elif allow_downcast:
-            raise TypeError('cannot downcast into TangentVector')
-        else:   # Covers both the False and None cases.
-             raise TypeError('The double type cannot accurately represent '
-                             'value %s (of type %s): you must explicitly '
-                             'allow downcasting if you want to do this.'
-                             % (x, type(x)))
+                raise TypeError("value must be a tuple(SharedVariable, shape) or a tuple of 3 ndarrays Up, M, Vp")
 
-    def __str__(self):
-        return "FixedRankManifoldType"
-
-ftan = FixedRankTangentType()
-
-class TangentVector(Variable):
-    def __init__(self, Up, M, Vp):
-        super(TangentVector, self).__init__(type(self))
-        self.Up = Up.copy()
-        self.M = M.copy()
-        self.Vp = Vp.copy()
-        self.shape=(Up.shape[0], Vp.shape[1])
-        self.ndim = len(self.shape)
-
-    def __neg__(self):
-        return TangentVector(-self.Up, -self.M, -self.Vp)
-
-    def __add__(self, other):
-        if isinstance(other, TangentVector):
-            return TangentVector(self.Up + other.Up, self.M + other.M, self.Vp + other.Vp)
-
-    def __sub__(self, other):
-        if isinstance(other, TangentVector):
-            return TangentVector(self.Up - other.Up, self.M - other.M, self.Vp - other.Vp)
-
-    def __mul__(self, other):
-        if tensor.iscalar(other):
-            return TangentVector(self.Up * other, self.M * other, self.Vp * other)
         else:
-            raise ValueError('TangentVector supports only multiplying by scalar')
+            raise TypeError("value must be tuple(SharedVariable, shape) or tuple of 3 ndarrays")
+        self.update_factor_view()
 
-    def __rmul__(self, other):
-        return self.__mul__(other)
+    def update_factor_view(self):
+        self.Up = theano.shared(self.get_value(borrow=True)[:self._m, :],
+                               borrow=True,
+                               name="Up")
+        self.M = theano.shared(self.get_value(borrow=True)[self._m: self._m + self._r, :],
+                               borrow=True,
+                               name="M")
+        self.Vp = theano.shared(self.get_value(borrow=True)[self._m + self._r :, :].T,
+                               borrow=True,
+                               name="Vp")
 
-    def make_zero(self):
-        self.Up = tensor.zeros_like(self.Up)
-        self.M = tensor.zeros_like(self.M)
-        self.Vp = tensor.zeros_like(self.Vp)
-
-    def clone(self):
+    def set_value(self, new_value, borrow=False):
         """
-        Return a new Variable like self.
-        Returns
-        -------
-        Variable instance
-            A new Variable instance (or subclass instance) with no owner or
-            index.
-        Notes
-        -----
-        Tags are copied to the returned instance.
-        Name is copied to the returned instance.
+        Set the non-symbolic value associated with this SharedVariable.
+        Parameters
+        ----------
+        borrow : bool
+            True to use the new_value directly, potentially creating problems
+            related to aliased memory.
+        Changes to this value will be visible to all functions using
+        this SharedVariable.
         """
-        # return copy(self)
-        cp = self.__class__(self.Up, self.M, self.Vp)
-        #cp = self.__class__(self.type, None, None, self.name)
-        #cp.tag = copy(self.tag)
-        return cp
+        if borrow:
+            self.container.value = new_value
+        else:
+            self.container.value = copy.deepcopy(new_value)
+        self.update_factor_view()
 
+    @property
+    def r(self):
+        return self._r
 
+    @property
+    def shape(self):
+        return (self._m, self._n)
+
+    @property
+    def ndim(self):
+        return len(self.shape)
+
+    @classmethod
+    def from_vars(cls, values, shape, r, name=None, type=theano.tensor.dmatrix):
+        u, s, v = values
+        value = theano.shared(np.zeros((shape[0] + shape[1] + r, r)))
+        new_value = value
+        new_value = theano.tensor.set_subtensor(new_value[:shape[0]], u)
+        new_value = theano.tensor.set_subtensor(new_value[shape[0]: shape[0] + r], s)
+        new_value = theano.tensor.set_subtensor(new_value[shape[0] + r :], v)
+        updates = [(value, new_value)]
+        func = theano.function(inputs=[], outputs=[], updates=updates)
+        func()
+        return cls((value, shape), name=name, type=type)
 
 
 class FixedRankEmbeeded(Manifold):
@@ -442,21 +259,28 @@ class FixedRankEmbeeded(Manifold):
 
     def tangent(self, X, Z):
         # ??? how can we perform inplace operations?
-        Z.Up = Z.Up - X.U.dot(X.U.T.dot(Z.Up))
-        Z.Vp = Z.Vp - (Z.Vp.dot(X.V.T)).dot(X.V)
+        # TODO make inplace update for Z.Up and Z.Vp
+        # like this:
+        # s.set_value(
+        #             some_inplace_fn(s.get_value(borrow=True)),
+        #             borrow=True)
 
-    def apply_ambient(self, Z, W):
-        if isinstance(Z, ManifoldElement):
+        #Z.Up = Z.Up - X.U.dot(X.U.T.dot(Z.Up))
+        #Z.Vp = Z.Vp - (Z.Vp.dot(X.V.T)).dot(X.V)
+        raise NotImplementedError("method is not imlemented")
+
+    def apply_ambient(self, Z, W, type="mat"):
+        if isinstance(Z, ManifoldElementShared):
             return Z.U.dot(Z.S.dot(Z.V.dot(W)))
-        if isinstance(Z, TangentVector):
+        if isinstance(Z, TangentVectorShared):
             return Z.Up.dot(Z.M.dot(Z.Vp.dot(W)))
         else:
             return Z.dot(W)
 
     def apply_ambient_transpose(self, Z, W):
-        if isinstance(Z, ManifoldElement):
+        if isinstance(Z, ManifoldElementShared):
             return Z.V.T.dot(Z.S.T.dot(Z.U.T.dot(W)))
-        if isinstance(Z, TangentVector):
+        if isinstance(Z, TangentVectorShared):
             return Z.Vp.T.dot(Z.M.T.dot(Z.Up.T.dot(W)))
         else:
             return Z.T.dot(W)
@@ -466,13 +290,16 @@ class FixedRankEmbeeded(Manifold):
         UtZV = X.U.T.dot(ZV)
         ZtU = self.apply_ambient_transpose(Z, X.U).T
 
-        Zproj = TangentVector(ZV - X.U.dot(UtZV), UtZV, ZtU - (UtZV.dot(X.V)))
+        Zproj = TangentVectorShared.from_vars((ZV - X.U.dot(UtZV), UtZV, ZtU - (UtZV.dot(X.V))),
+                                              shape=(self._m, self._n), r=self._k)
         return Zproj
 
     def egrad2rgrad(self, X, Z):
         return self.proj(X, Z)
 
     def ehess2rhess(self, X, egrad, ehess, H):
+        # TODO same problem as tangent
+        """
         # Euclidean part
         rhess = self.proj(X, ehess)
         Sinv = tensor.diag(1.0 / tensor.diag(X.S))
@@ -483,6 +310,8 @@ class FixedRankEmbeeded(Manifold):
         T = self.apply_ambient_transpose(egrad, H.Up).dot(Sinv)
         rhess.Vp += (T - X.V.T.dot(X.V.dot(T))).T
         return rhess
+        """
+        raise NotImplementedError("method is not imlemented")
 
     def tangent2ambient(self, X, Z):
         U = tensor.stack((X.U.dot(Z.M) + Z.Up, X.U), 0).reshape((-1, X.U.shape[1]))
@@ -490,7 +319,7 @@ class FixedRankEmbeeded(Manifold):
         S = tensor.eye(2*self._k)
         V = tensor.stack((X.V, Z.Vp), 1).reshape((X.V.shape[0], -1))
         #V = np.vstack((X.V, Z.Vp))
-        return ManifoldElement(U, S, V)
+        return ManifoldElementShared.from_vars((U, S, V), shape=(self._m, self._n), r=self._k)
 
     def retr(self, X, Z, t=None):
         if t is None:
@@ -522,7 +351,7 @@ class FixedRankEmbeeded(Manifold):
         # add some machinery eps to get a slightly perturbed element of a manifold
         # even if we have some zeros in S
         S = tensor.diag(St[:self._k]) + tensor.diag(np.spacing(1) * tensor.ones(self._k))
-        return ManifoldElement(U, S, V)
+        return ManifoldElementShared.from_vars((U, S, V), shape=(self._m, self._n), r=self._k)
 
     def exp(self, X, U, t=None):
         warnings.warn("Exponential map for fixed-rank matrix"
@@ -536,11 +365,9 @@ class FixedRankEmbeeded(Manifold):
         return q
 
     def rand(self):
-        U = theano.shared(self.np_rand((self._m, self._k)))
-        V = theano.shared(self.np_rand((self._n, self._k)).T)
         s = np.sort(np.random.random(self._k))[::-1]
         S = np.diag(s / la.norm(s) + np.spacing(1) * np.ones(self._k))
-        return ManifoldElement(U, theano.shared(S), V)
+        return ManifoldElementShared(rnd.randn(self._m, self._k), S, rnd.randn(self._k, self._n))
 
     def randvec(self, X):
         H = self.rand()
@@ -548,9 +375,9 @@ class FixedRankEmbeeded(Manifold):
         return self._normalize(P)
 
     def zerovec(self, X):
-        return TangentVector(tensor.zeros((self._m, self._k)),
-                                tensor.zeros((self._k, self._k)),
-                                tensor.zeros((self._k, self._n)))
+        return TangentVectorShared(np.zeros((self._m, self._k)),
+                                np.zeros((self._k, self._k)),
+                                np.zeros((self._k, self._n)))
 
     def vec(self, X, Z):
         Zamb = self.tangent2ambient(X, Z)
@@ -562,7 +389,7 @@ class FixedRankEmbeeded(Manifold):
         Up = P.Up
         M = P.M / tensor.nlinalg.norm(P.M)
         Vp = P.Vp
-        return TangentVector(Up, M, Vp)
+        return TangentVectorShared.from_vars((Up, M, Vp), shape=(self._m, self._n), r=self._k)
 
     def log(self, X, Y):
         raise NotImplementedError
@@ -575,12 +402,12 @@ class FixedRankEmbeeded(Manifold):
             Up = a1 * u1.Up
             Vp = a1 * u1.Vp
             M = a1 * u1.M
-            return TangentVector(Up, M, Vp)
+            return TangentVectorShared.from_vars((Up, M, Vp), shape=(self._m, self._n), r=self._k)
         elif None not in [a1, u1, a2, u2]:
             Up = a1 * u1.Up + a2 * u2.Up
             Vp = a1 * u1.Vp + a2 * u2.Vp
             M = a1 * u1.M + a2 * u2.M
-            return TangentVector(Up, M, Vp)
+            return TangentVectorShared.from_vars((Up, M, Vp), shape=(self._m, self._n), r=self._k)
         else:
             raise ValueError('FixedRankEmbeeded.lincomb takes 3 or 5 arguments')
 
