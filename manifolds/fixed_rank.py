@@ -88,6 +88,25 @@ class ManifoldElementShared(theano.compile.SharedVariable):
     def ndim(self):
         return len(self.shape)
 
+    def clone(self):
+        """
+        Return a new Variable like self.
+        Returns
+        -------
+        Variable instance
+            A new Variable instance (or subclass instance) with no owner or
+            index.
+        Notes
+        -----
+        Tags are copied to the returned instance.
+        Name is copied to the returned instance.
+        """
+        # return copy(self)
+        cp = self.__class__((self.U.get_value(), self.S.get_value(), self.V.get_value()), name=self.name, type=self.type)
+        #cp = self.__class__(self.type, None, None, self.name)
+        #cp.tag = copy(self.tag)
+        return cp
+
     @classmethod
     def from_vars(cls, values, shape, r, name=None, type=theano.tensor.dmatrix):
         u, s, v = values
@@ -167,6 +186,25 @@ class TangentVectorShared(theano.compile.SharedVariable):
     @property
     def ndim(self):
         return len(self.shape)
+
+    def clone(self):
+        """
+        Return a new Variable like self.
+        Returns
+        -------
+        Variable instance
+            A new Variable instance (or subclass instance) with no owner or
+            index.
+        Notes
+        -----
+        Tags are copied to the returned instance.
+        Name is copied to the returned instance.
+        """
+        # return copy(self)
+        cp = self.__class__((self.Up.get_value(), self.M.get_value(), self.Vp.get_value()), name=self.name, type=self.type)
+        #cp = self.__class__(self.type, None, None, self.name)
+        #cp.tag = copy(self.tag)
+        return cp
 
     @classmethod
     def from_vars(cls, values, shape, r, name=None, type=theano.tensor.dmatrix):
@@ -364,10 +402,10 @@ class FixedRankEmbeeded(Manifold):
         q, r = np.linalg.qr(X)
         return q
 
-    def rand(self):
+    def rand(self, name=None):
         s = np.sort(np.random.random(self._k))[::-1]
         S = np.diag(s / la.norm(s) + np.spacing(1) * np.ones(self._k))
-        return ManifoldElementShared(rnd.randn(self._m, self._k), S, rnd.randn(self._k, self._n))
+        return ManifoldElementShared((rnd.randn(self._m, self._k), S, rnd.randn(self._k, self._n)), name=name)
 
     def randvec(self, X):
         H = self.rand()

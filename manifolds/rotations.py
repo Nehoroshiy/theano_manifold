@@ -14,17 +14,15 @@ from manifolds.manifold import Manifold
 class Rotations(Manifold):
     """
     Manifold of matrices from SO(n).
-    Ootations manifold: deals with matrices of size m-by-n such that each column
-    has unit 2-norm, i.e., is a point on the unit sphere in R^m. The metric
-    is such that the oblique manifold is a Riemannian submanifold of the
-    space of m-by-n matrices with the usual trace inner product, i.e., the
-    usual metric.
+    Rotations manifold: deals with matrices X of size n-by-n such that X^T X = I.
     """
 
-    def __init__(self, m, n):
-        self._m = m
+    def __init__(self, n):
         self._n = n
 
     def __str__(self):
-        return "Oblique manifold OB({:d}, {:d})".format(self._m, self._n)
+        return "Rotations manifold SO({:d})".format(self._n)
 
+    @property
+    def dim(self):
+        return self._n * self._n
